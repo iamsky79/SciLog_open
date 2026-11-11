@@ -1,0 +1,36 @@
+-- 014_report_schedule.sql가 report_schedules를 만들 때 submission_type 컬럼을
+-- 정의하지 않았는데, 그 이후 코드(PlanSection.tsx/ReportSection.tsx의 마감일
+-- 배너 조회, admin/report-schedule/page.tsx의 일정 생성/수정 폼)는 처음부터
+-- report_schedules.submission_type이 있다고 가정하고 그 컬럼으로 select/insert/
+-- update를 해왔다. 실제 DB에는 컬럼이 없으니 PostgREST가 42703(컬럼 없음)으로
+-- 매 요청을 거부했고, 그 결과:
+--   - 관리자가 "제출 일정 관리"에서 일정을 추가/수정해도 insert/update 자체가
+--     항상 실패해 실제로는 아무 일정도 저장된 적이 없다(에러를 사용자에게 보여주는
+--     처리가 없어 저장된 것처럼 보였을 뿐).
+--   - 학생 계획서/결과보고서 화면의 마감일 배너 조회도 매번 400으로 실패했지만,
+--     그 실패를 조용히 무시하고 배너만 안 보여주게 방어돼 있어(scilog 세션 중
+--     실제 브라우저 테스트로 재현/확인) 겉으로는 "그냥 배너가 없나보다"로 보였다.
+--
+-- [2026-09-23 backfill 안전성 재검토]
+-- report_schedules는 지금 컬럼 자체가 없으므로 어떤 기존 행도 submission_type
+-- 값을 저장해본 적이 없다 — insert가 매번 42703으로 막혔기 때문에(위 설명) 실제로
+-- production에 저장된 행 자체가 하나도 없다(service role로 직접 조회해 0건 확인,
+-- 2026-09-22/23). 즉 "이 환경"에서는 backfill 오분류 위험이 실질적으로 없다.
+--
+-- 그래도 이 migration 파일이 나중에 행이 있는 다른 환경에 적용될 가능성까지
+-- 고려해, "not null default 'report'"로 전부 report로 단정하지 않는다. title/
+-- description 텍스트만으로 plan/note/registration을 안전하게 구분할 근거가 없으므로
+-- (예: 제목에 "계획서"가 없어도 계획서 일정일 수 있음 — 임의 추정하지 않는다),
+-- 컬럼을 nullable로 두고 과거 행은 "타입 미상(NULL)"으로 남긴다. 이후 코드는
+-- submission_type이 정확히 'plan'/'report' 등과 일치할 때만 해당 유형으로
+-- 취급하므로(strict equality), NULL 값은 어느 특정 유형으로도 오분류되지 않고
+-- 그냥 "추적 대상 아님"으로 안전하게 빠진다 — src/lib/admin/submissionStatus.ts의
+-- isTrackable()과 admin/report-schedule/page.tsx의 탭 필터(표시용 폴백만 'report',
+-- 저장값 자체는 바꾸지 않음)가 이미 이 원칙을 따른다.
+--
+-- 새로 만들어지는 행(관리자 "제출 일정 관리" 폼)은 지금도 항상 명시적인
+-- submission_type 값을 함께 저장하므로, 이 nullable 완화는 오직 "컬럼이 없던
+-- 시절의 과거 데이터가 있을 수 있는 환경"을 위한 안전장치일 뿐이다.
+
+alter table public.report_schedules
+  add column if not exists submission_type text;
